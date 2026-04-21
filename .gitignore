@@ -3,7 +3,8 @@ target/
 **/target/
 
 # Generated distribution artifacts
-dist/
+dist/*
+!dist/*.zip
 
 # Common local IDE/system files
 .DS_Store
