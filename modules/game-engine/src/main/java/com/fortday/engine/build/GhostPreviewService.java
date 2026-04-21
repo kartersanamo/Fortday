@@ -200,11 +200,11 @@ public final class GhostPreviewService {
 
     private Material ghostMaterial(BuildPieceType piece) {
         return switch (piece) {
-            // Reserved preview-only materials. Resource pack remaps these to ghost visuals.
-            case WALL -> Material.AMETHYST_BLOCK;
-            case FLOOR -> Material.CALCITE;
-            case RAMP -> Material.TUFF;
-            case CONE -> Material.POLISHED_DEEPSLATE;
+            // Use translucent block types so alpha in custom textures is actually visible.
+            case WALL -> Material.LIGHT_BLUE_STAINED_GLASS;
+            case FLOOR -> Material.LIME_STAINED_GLASS;
+            case RAMP -> Material.ORANGE_STAINED_GLASS;
+            case CONE -> Material.PURPLE_STAINED_GLASS;
         };
     }
 
