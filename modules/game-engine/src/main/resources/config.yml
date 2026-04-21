@@ -1,0 +1,19 @@
+match:
+  minPlayers: 20
+  maxPlayers: 100
+  warmupSeconds: 45
+storm:
+  enabled: true
+  seedMode: deterministic
+  phases:
+    - radius: 1000
+      durationSeconds: 240
+      damagePerTick: 0
+    - radius: 600
+      durationSeconds: 210
+      damagePerTick: 1
+    - radius: 300
+      durationSeconds: 180
+      damagePerTick: 2
+performance:
+  minTpsFloor: 18.5
