@@ -1,0 +1,11 @@
+# Maven build outputs
+target/
+**/target/
+
+# Generated distribution artifacts
+dist/
+
+# Common local IDE/system files
+.DS_Store
+.idea/
+*.iml
