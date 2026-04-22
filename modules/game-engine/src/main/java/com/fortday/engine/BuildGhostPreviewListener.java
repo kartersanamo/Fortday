@@ -3,16 +3,26 @@ package com.fortday.engine;
 import com.fortday.engine.build.BuildPieceType;
 import com.fortday.engine.build.GhostPreviewService;
 import org.bukkit.ChatColor;
+import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.Action;
+import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerItemHeldEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
 public final class BuildGhostPreviewListener implements Listener {
+    private static final long PLACE_DEBOUNCE_MS = 75L;
+
     private final GhostPreviewService previewService;
+    private final Map<UUID, Long> lastPlaceAt = new ConcurrentHashMap<>();
 
     public BuildGhostPreviewListener(GhostPreviewService previewService) {
         this.previewService = previewService;
@@ -29,6 +39,7 @@ public final class BuildGhostPreviewListener implements Listener {
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
+        lastPlaceAt.remove(event.getPlayer().getUniqueId());
         previewService.clearPlayer(event.getPlayer());
     }
 
@@ -52,6 +63,25 @@ public final class BuildGhostPreviewListener implements Listener {
             return;
         }
         previewService.renderPreview(event.getPlayer());
+    }
+
+    @EventHandler
+    public void onInteract(PlayerInteractEvent event) {
+        if (event.getAction() != Action.RIGHT_CLICK_AIR && event.getAction() != Action.RIGHT_CLICK_BLOCK) {
+            return;
+        }
+        Player player = event.getPlayer();
+        long now = System.currentTimeMillis();
+        Long last = lastPlaceAt.get(player.getUniqueId());
+        if (last != null && now - last < PLACE_DEBOUNCE_MS) {
+            return;
+        }
+        int placed = previewService.placePreview(player, Material.OAK_PLANKS);
+        if (placed > 0) {
+            lastPlaceAt.put(player.getUniqueId(), now);
+            event.setCancelled(true);
+            previewService.renderPreview(player);
+        }
     }
 
     private BuildPieceType mapSlotToPiece(int slot) {

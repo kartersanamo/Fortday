@@ -6,20 +6,36 @@ import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
-import org.bukkit.block.data.BlockData;
+import org.bukkit.entity.BlockDisplay;
+import org.bukkit.entity.Display;
 import org.bukkit.entity.Player;
+import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
+import org.bukkit.util.Transformation;
 
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 public final class GhostPreviewService {
+    private static final int TILE_SIZE = 5;
+    private static final int TILE_STRIDE = 4; // overlap corners by 1 block across adjacent pieces
+    private static final int HALF_SPAN = TILE_SIZE / 2; // 2 for 5x5
+
+    private final JavaPlugin plugin;
     private final ConcurrentMap<UUID, BuildPieceType> selectedPiece = new ConcurrentHashMap<>();
-    private final ConcurrentMap<UUID, Set<BlockPosition>> renderedBlocks = new ConcurrentHashMap<>();
+    private final ConcurrentMap<UUID, Map<BlockPosition, BlockDisplay>> renderedDisplays = new ConcurrentHashMap<>();
+
+    public GhostPreviewService(JavaPlugin plugin) {
+        this.plugin = plugin;
+    }
 
     public BuildPieceType selectedPiece(Player player) {
         return selectedPiece.getOrDefault(player.getUniqueId(), BuildPieceType.WALL);
@@ -47,37 +63,35 @@ public final class GhostPreviewService {
             return;
         }
 
-        Set<BlockPosition> next = computePreview(anchor, piece, player.getLocation().getYaw());
-        Set<BlockPosition> prev = renderedBlocks.getOrDefault(player.getUniqueId(), Set.of());
-        World world = anchor.world();
-
-        Material ghostMaterial = ghostMaterial(piece);
-        BlockData ghostData = ghostMaterial.createBlockData();
-
-        for (BlockPosition oldPos : prev) {
-            if (!next.contains(oldPos)) {
-                Block realBlock = world.getBlockAt(oldPos.x(), oldPos.y(), oldPos.z());
-                player.sendBlockChange(toLocation(world, oldPos), realBlock.getBlockData());
-            }
-        }
-
-        for (BlockPosition pos : next) {
-            player.sendBlockChange(toLocation(world, pos), ghostData);
-        }
-
-        renderedBlocks.put(player.getUniqueId(), next);
+        rebuildDisplays(player, anchor, piece, player.getLocation().getYaw());
     }
 
     public void clearPreview(Player player) {
-        Set<BlockPosition> prev = renderedBlocks.remove(player.getUniqueId());
-        if (prev == null || prev.isEmpty()) {
+        Map<BlockPosition, BlockDisplay> displays = renderedDisplays.remove(player.getUniqueId());
+        if (displays == null || displays.isEmpty()) {
             return;
         }
-        World world = player.getWorld();
-        for (BlockPosition pos : prev) {
-            Block realBlock = world.getBlockAt(pos.x(), pos.y(), pos.z());
-            player.sendBlockChange(toLocation(world, pos), realBlock.getBlockData());
+        for (BlockDisplay display : displays.values()) {
+            display.remove();
         }
+    }
+
+    public int placePreview(Player player, Material material) {
+        Map<BlockPosition, BlockDisplay> displays = renderedDisplays.get(player.getUniqueId());
+        if (displays == null || displays.isEmpty()) {
+            return 0;
+        }
+
+        World world = player.getWorld();
+        int placed = 0;
+        for (BlockPosition pos : displays.keySet()) {
+            Block block = world.getBlockAt(pos.x(), pos.y(), pos.z());
+            if (block.getType().isAir()) {
+                block.setType(material, false);
+                placed++;
+            }
+        }
+        return placed;
     }
 
     private Anchor resolveAnchor(Player player) {
@@ -94,7 +108,13 @@ public final class GhostPreviewService {
 
         Block target = hit.getRelative(face);
         Location loc = target.getLocation();
-        return new Anchor(target.getWorld(), loc.getBlockX(), loc.getBlockY(), loc.getBlockZ(), face);
+        return new Anchor(
+                target.getWorld(),
+                snapToGrid(loc.getBlockX()),
+                snapToGrid(loc.getBlockY()),
+                snapToGrid(loc.getBlockZ()),
+                face
+        );
     }
 
     private Anchor fallbackAnchor(Player player) {
@@ -104,63 +124,126 @@ public final class GhostPreviewService {
         Location target = eye.add(dir);
         return new Anchor(
                 player.getWorld(),
-                target.getBlockX(),
-                target.getBlockY(),
-                target.getBlockZ(),
+                snapToGrid(target.getBlockX()),
+                snapToGrid(target.getBlockY()),
+                snapToGrid(target.getBlockZ()),
                 yawToFace(player.getLocation().getYaw())
         );
     }
 
-    private Set<BlockPosition> computePreview(Anchor anchor, BuildPieceType piece, float yaw) {
-        Set<BlockPosition> out = new HashSet<>();
+    private void rebuildDisplays(Player player, Anchor anchor, BuildPieceType piece, float yaw) {
         int x = anchor.x();
         int y = anchor.y();
         int z = anchor.z();
         BlockFace horizontal = toHorizontalFace(anchor.face(), yaw);
+        World world = anchor.world();
+        Set<BlockPosition> next = switch (piece) {
+            case FLOOR -> floorBlocks(x, y, z);
+            case CONE -> coneBlocks(x, y, z);
+            case WALL -> wallBlocks(x, y, z, horizontal);
+            case RAMP -> rampBlocks(x, y, z, horizontal);
+        };
 
-        switch (piece) {
-            case WALL -> {
-                Vector normal = faceToNormal(horizontal);
-                Vector axis = new Vector(normal.getZ(), 0, -normal.getX());
-                for (int dy = 0; dy < 3; dy++) {
-                    for (int side = -1; side <= 1; side++) {
-                        int bx = x + axis.getBlockX() * side;
-                        int bz = z + axis.getBlockZ() * side;
-                        out.add(new BlockPosition(bx, y + dy, bz));
-                    }
-                }
-            }
-            case FLOOR -> {
-                for (int dx = -1; dx <= 1; dx++) {
-                    for (int dz = -1; dz <= 1; dz++) {
-                        out.add(new BlockPosition(x + dx, y, z + dz));
-                    }
-                }
-            }
-            case CONE -> {
-                for (int dx = -1; dx <= 1; dx++) {
-                    for (int dz = -1; dz <= 1; dz++) {
-                        out.add(new BlockPosition(x + dx, y, z + dz));
-                    }
-                }
-                out.add(new BlockPosition(x, y + 1, z));
-            }
-            case RAMP -> {
-                Vector forward = faceToNormal(horizontal);
-                for (int step = 0; step < 3; step++) {
-                    int by = y + step;
-                    int cx = x + forward.getBlockX() * step;
-                    int cz = z + forward.getBlockZ() * step;
-                    Vector axis = new Vector(forward.getZ(), 0, -forward.getX());
-                    for (int side = -1; side <= 1; side++) {
-                        int bx = cx + axis.getBlockX() * side;
-                        int bz = cz + axis.getBlockZ() * side;
-                        out.add(new BlockPosition(bx, by, bz));
-                    }
-                }
+        Map<BlockPosition, BlockDisplay> current = renderedDisplays.computeIfAbsent(player.getUniqueId(), ignored -> new HashMap<>());
+        Set<BlockPosition> toRemove = new HashSet<>(current.keySet());
+        toRemove.removeAll(next);
+        for (BlockPosition pos : toRemove) {
+            BlockDisplay display = current.remove(pos);
+            if (display != null) {
+                display.remove();
             }
         }
 
+        for (BlockPosition pos : next) {
+            if (!current.containsKey(pos)) {
+                current.put(pos, spawnDisplay(world, player, pos));
+            }
+        }
+    }
+
+    private Set<BlockPosition> floorBlocks(int x, int y, int z) {
+        Set<BlockPosition> out = new HashSet<>();
+        for (int dx = -HALF_SPAN; dx <= HALF_SPAN; dx++) {
+            for (int dz = -HALF_SPAN; dz <= HALF_SPAN; dz++) {
+                out.add(new BlockPosition(x + dx, y, z + dz));
+            }
+        }
+        return out;
+    }
+
+    private Set<BlockPosition> coneBlocks(int x, int y, int z) {
+        Set<BlockPosition> out = new HashSet<>();
+        for (int dx = -HALF_SPAN; dx <= HALF_SPAN; dx++) {
+            for (int dz = -HALF_SPAN; dz <= HALF_SPAN; dz++) {
+                out.add(new BlockPosition(x + dx, y, z + dz));
+            }
+        }
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                out.add(new BlockPosition(x + dx, y + 1, z + dz));
+            }
+        }
+        out.add(new BlockPosition(x, y + 2, z));
+        return out;
+    }
+
+    private Set<BlockPosition> wallBlocks(int x, int y, int z, BlockFace face) {
+        Set<BlockPosition> out = new HashSet<>();
+        int wx = x;
+        int wz = z;
+        if (face == BlockFace.NORTH) {
+            wz = z - HALF_SPAN;
+        } else if (face == BlockFace.SOUTH) {
+            wz = z + HALF_SPAN;
+        } else if (face == BlockFace.EAST) {
+            wx = x + HALF_SPAN;
+        } else if (face == BlockFace.WEST) {
+            wx = x - HALF_SPAN;
+        }
+
+        boolean northSouth = face == BlockFace.NORTH || face == BlockFace.SOUTH;
+        for (int dy = 0; dy < TILE_SIZE; dy++) {
+            for (int side = -HALF_SPAN; side <= HALF_SPAN; side++) {
+                int bx = northSouth ? wx + side : wx;
+                int bz = northSouth ? wz : wz + side;
+                out.add(new BlockPosition(bx, y + dy, bz));
+            }
+        }
+        return out;
+    }
+
+    private Set<BlockPosition> rampBlocks(int x, int y, int z, BlockFace face) {
+        Set<BlockPosition> out = new HashSet<>();
+        for (int step = 0; step < TILE_SIZE; step++) {
+            int by = y + step;
+            for (int side = -HALF_SPAN; side <= HALF_SPAN; side++) {
+                int bx;
+                int bz;
+                switch (face) {
+                    case NORTH -> {
+                        bx = x + side;
+                        bz = z + HALF_SPAN - step;
+                    }
+                    case SOUTH -> {
+                        bx = x + side;
+                        bz = z - HALF_SPAN + step;
+                    }
+                    case EAST -> {
+                        bx = x - HALF_SPAN + step;
+                        bz = z + side;
+                    }
+                    case WEST -> {
+                        bx = x + HALF_SPAN - step;
+                        bz = z + side;
+                    }
+                    default -> {
+                        bx = x + side;
+                        bz = z - HALF_SPAN + step;
+                    }
+                }
+                out.add(new BlockPosition(bx, by, bz));
+            }
+        }
         return out;
     }
 
@@ -188,28 +271,39 @@ public final class GhostPreviewService {
         return BlockFace.SOUTH;
     }
 
-    private Vector faceToNormal(BlockFace face) {
-        return switch (face) {
-            case NORTH -> new Vector(0, 0, -1);
-            case SOUTH -> new Vector(0, 0, 1);
-            case EAST -> new Vector(1, 0, 0);
-            case WEST -> new Vector(-1, 0, 0);
-            default -> new Vector(0, 0, 1);
-        };
+    private int snapToGrid(int value) {
+        return Math.floorDiv(value, TILE_STRIDE) * TILE_STRIDE;
     }
 
-    private Material ghostMaterial(BuildPieceType piece) {
-        return switch (piece) {
-            // Use translucent block types so alpha in custom textures is actually visible.
-            case WALL -> Material.LIGHT_BLUE_STAINED_GLASS;
-            case FLOOR -> Material.LIME_STAINED_GLASS;
-            case RAMP -> Material.ORANGE_STAINED_GLASS;
-            case CONE -> Material.PURPLE_STAINED_GLASS;
-        };
+    private BlockDisplay spawnDisplay(World world, Player owner, BlockPosition pos) {
+        Location origin = new Location(world, pos.x(), pos.y(), pos.z());
+        BlockDisplay display = world.spawn(origin, BlockDisplay.class, entity -> {
+            entity.setBlock(ghostMaterial().createBlockData());
+            entity.setInterpolationDelay(0);
+            entity.setInterpolationDuration(1);
+            entity.setBrightness(new Display.Brightness(15, 15));
+            entity.setGlowColorOverride(org.bukkit.Color.fromRGB(85, 190, 255));
+            entity.setGlowing(true);
+            entity.setTransformation(new Transformation(
+                    new Vector3f(0f, 0f, 0f),
+                    new Quaternionf(),
+                    new Vector3f(1f, 1f, 1f),
+                    new Quaternionf()
+            ));
+        });
+
+        for (Player online : world.getPlayers()) {
+            if (!online.getUniqueId().equals(owner.getUniqueId())) {
+                online.hideEntity(plugin, display);
+            } else {
+                online.showEntity(plugin, display);
+            }
+        }
+        return display;
     }
 
-    private Location toLocation(World world, BlockPosition pos) {
-        return new Location(world, pos.x(), pos.y(), pos.z());
+    private Material ghostMaterial() {
+        return Material.LIGHT_BLUE_STAINED_GLASS;
     }
 
     private record Anchor(World world, int x, int y, int z, BlockFace face) {
@@ -217,4 +311,5 @@ public final class GhostPreviewService {
 
     private record BlockPosition(int x, int y, int z) {
     }
+
 }

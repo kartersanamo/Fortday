@@ -18,7 +18,7 @@ public final class FortdayEnginePlugin extends JavaPlugin {
         } else {
             getLogger().warning("No embedded config.yml found; using runtime defaults.");
         }
-        this.ghostPreviewService = new GhostPreviewService();
+        this.ghostPreviewService = new GhostPreviewService(this);
         Bukkit.getPluginManager().registerEvents(
                 new BuildGhostPreviewListener(ghostPreviewService),
                 this
